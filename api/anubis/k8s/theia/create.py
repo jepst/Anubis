@@ -3,11 +3,16 @@ import json
 
 from kubernetes import client as k8s, config as k8s_config
 
-from anubis.constants import THEIA_DEFAULT_OPTIONS, WEBTOP_DEFAULT_OPTIONS
+from anubis.constants import (
+    THEIA_DEFAULT_OPTIONS,
+    WEBTOP_DEFAULT_OPTIONS,
+    THEIA_VALID_NETWORK_POLICIES,
+    THEIA_DEFAULT_NETWORK_POLICY
+)
 from anubis.github.parse import parse_github_repo_name
 from anubis.k8s.pvc.get import get_user_pvc
 from anubis.k8s.theia.get import get_theia_pod_name
-from anubis.lms.shell_autograde import get_exercise_py_text
+from anubis.lms.shell_autograde import get_exercise_py_text, resume_submission
 from anubis.models import TheiaSession, Assignment
 from anubis.utils.auth.token import create_token
 from anubis.utils.data import is_debug
@@ -51,11 +56,19 @@ def create_theia_k8s_pod_pvc(
     theia_extra_env: list[k8s.V1EnvVar] = []
     init_extra_env: list[k8s.V1EnvVar] = []
 
+    shared_log_volume = k8s.V1Volume(name="log", empty_dir={})
+    shared_log_volume_mount = k8s.V1VolumeMount(name="log", mount_path="/log")
+    pod_volumes.append(shared_log_volume)
+
     # Get the set repo url for this session. If the assignment has github repos disabled,
     # then default to an empty string.
     repo_url = theia_session.repo_url or ""
     repo_name = parse_github_repo_name(repo_url)
     webtop = theia_session.image.webtop
+
+    # Figure out which uid to use
+    default_theia_user_id = 1001
+    theia_user_id = default_theia_user_id if not webtop else 0
 
     # Get the theia session options
     if not theia_session.image.webtop:
@@ -287,7 +300,10 @@ def create_theia_k8s_pod_pvc(
             run_as_user=1001,
         ),
         # Add the shared volume mount to /home/project
-        volume_mounts=autosave_volume_mounts,
+        volume_mounts=[
+            shared_log_volume_mount,
+            *autosave_volume_mounts
+        ],
     )
 
     ##################################################################################
@@ -318,6 +334,7 @@ def create_theia_k8s_pod_pvc(
             ),
             # Add the shared certs volume
             volume_mounts=[
+                shared_log_volume_mount,
                 *ide_volume_mounts,
             ],
         )
@@ -337,12 +354,14 @@ def create_theia_k8s_pod_pvc(
             image="registry.digitalocean.com/anubis/theia-autograde",
             image_pull_policy="IfNotPresent",
             env=[
-                *autosave_extra_env,
+                k8s.V1EnvVar(name="NETID", value=netid),
                 k8s.V1EnvVar(name="TOKEN", value=submission.token),
                 k8s.V1EnvVar(name="SUBMISSION_ID", value=submission.id),
                 k8s.V1EnvVar(name="EXERCISE_PY", value=get_exercise_py_text(theia_session.assignment)),
+                k8s.V1EnvVar(name="RESUME", value=resume_submission(submission)),
             ],
             volume_mounts=[
+                shared_log_volume_mount,
                 *ide_volume_mounts,
             ],
 
@@ -353,10 +372,15 @@ def create_theia_k8s_pod_pvc(
                 failure_threshold=60,
                 period_seconds=1,
                 initial_delay_seconds=0,
-            )
+            ),
+            security_context=k8s.V1SecurityContext(
+                allow_privilege_escalation=False,
+                privileged=False,
+                run_as_user=default_theia_user_id,
+            ),
         )
 
-        pod_labels_extra["shell-autograde"] = 'true'
+        pod_labels_extra["shell-autograde"] = 'ON'
 
         theia_extra_env.append(
             k8s.V1EnvVar(
@@ -418,11 +442,6 @@ def create_theia_k8s_pod_pvc(
                 value=theia_session.course.course_code,
             )
         )
-
-    # Figure out which uid to use
-    theia_user_id = 1001
-    if webtop:
-        theia_user_id = 0
 
     # If privileged, add docker config file to pod as a volume
     if admin and include_docker_secret:
@@ -503,7 +522,10 @@ def create_theia_k8s_pod_pvc(
         ),
         # setup the shared volume where the student
         # repo exists.
-        volume_mounts=ide_volume_mounts,
+        volume_mounts=[
+            shared_log_volume_mount,
+            *ide_volume_mounts
+        ],
         # Startup probe is the way that kubernetes can
         # check to see if the theia has started correctly.
         # The pod will not be marked as ready until the
@@ -537,27 +559,25 @@ def create_theia_k8s_pod_pvc(
     pod_containers.append(theia_container)
     pod_containers.append(autosave_container)
 
+    # All IDEs must have a network policy attached to them. This section reads the network
+    # policy specified for the IDE, and verifies it is in the set of acceptable network policy
+    # names ( defined in anubis/constants.py ). If the policy is not valid, fallback to the default.
+    network_policy = theia_session.network_policy \
+        if theia_session.network_policy in THEIA_VALID_NETWORK_POLICIES \
+        else THEIA_DEFAULT_NETWORK_POLICY
+
+    # This label will enable the student network policy to be
+    # applied to this container. The gist of this policy is that
+    # students will only be able to connect to github.
+    pod_labels_extra["network-policy"] = network_policy
 
     # If network locked, then set the network policy to student
     # and dns to 1.1.1.1
-    if theia_session.network_locked:
-
-        # This label will enable the student network policy to be
-        # applied to this container. The gist of this policy is that
-        # students will only be able to connect to github.
-        pod_labels_extra["network-policy"] = theia_session.network_policy or "os-student"
-
+    if theia_session.network_dns_locked:
         # set up the pod DNS to be pointed to cloudflare 1.1.1.1 instead
         # of the internal kubernetes dns.
         pod_spec_extra["dns_policy"] = "None"
         pod_spec_extra["dns_config"] = k8s.V1PodDNSConfig(nameservers=["1.1.1.1"])
-
-    # If the network is not locked, then we still need to apply
-    # the admin policy. The gist of this policy is that the pod
-    # can only connect to the api within the cluster, and anything
-    # outside of the cluster.
-    else:
-        pod_labels_extra["network-policy"] = "admin"
 
     # Create pod object
     pod = k8s.V1Pod(

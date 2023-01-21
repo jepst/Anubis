@@ -45,10 +45,8 @@ fi
 minikube start \
          --feature-gates=TTLAfterFinished=true \
          --ports=80:80,443:443 \
-         --network-plugin=cni \
          --cpus=${CPUS} \
          --memory=${MEM} \
-         --cni=calico \
          --kubernetes-version=v1.21.5
 
 # Give the cluster a second
@@ -77,6 +75,7 @@ helm repo update
 
 # Create the anubis namespace
 kubectl create namespace anubis
+kubectl config set-context --current --namespace=anubis
 
 # Create a minimal mariadb deployment in a mariadb namespace. On
 # prod, the mariadb is in a seperate namespace, so we do the same
@@ -139,4 +138,4 @@ fi
 
 # Run the debug.sh script to build, then install all the stuff
 # for anubis.
-exec ./debug/restart.sh
+#exec ./debug/restart.sh

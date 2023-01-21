@@ -1,8 +1,17 @@
 # Standard IDE variables
+THEIA_DEFAULT_NETWORK_POLICY: str = "student"
+THEIA_ADMIN_NETWORK_POLICY: str = "admin"
+THEIA_SHELL_AUTOGRADE_NETWORK_POLICY: str = 'shell-autograde-student'
+THEIA_VALID_NETWORK_POLICIES: set[str] = {
+    THEIA_DEFAULT_NETWORK_POLICY,
+    THEIA_ADMIN_NETWORK_POLICY,
+    THEIA_SHELL_AUTOGRADE_NETWORK_POLICY
+}
 THEIA_DEFAULT_OPTIONS = {
     "autosave": True,
     "persistent_storage": False,
-    "network_policy": "os-student",
+    "network_dns_locked": True,
+    "network_policy": THEIA_DEFAULT_NETWORK_POLICY,
     "resources": {
         "requests": {"cpu": "750m", "memory": "500Mi"},
         "limits": {"cpu": "1.5", "memory": "750Mi"},
@@ -25,7 +34,8 @@ DEVELOPER_DEFAULT_OPTIONS = {
 WEBTOP_DEFAULT_OPTIONS = {
     "autosave": True,
     "persistent_storage": False,
-    "network_policy": "os-student",
+    "network_policy": THEIA_DEFAULT_NETWORK_POLICY,
+    "network_dns_locked": True,
     "resources": {
         "requests": {"cpu": "1000m", "memory": "1Gi"},
         "limits": {"cpu": "3000m", "memory": "4Gi"},

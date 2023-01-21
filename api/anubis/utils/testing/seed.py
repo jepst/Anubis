@@ -9,12 +9,6 @@ from anubis.github.repos import get_student_assignment_repo_name
 from anubis.ide.reap import mark_session_ended
 from anubis.lms.questions import assign_questions
 from anubis.models import (
-    ForumPost,
-    ForumPostComment,
-    ForumCategory,
-    ForumPostInCategory,
-    ForumPostViewed,
-    ForumPostUpvote,
     Assignment,
     AssignmentQuestion,
     AssignmentRepo,
@@ -129,8 +123,19 @@ def create_assignment(
         db.session.add(assignment_question)
 
     tests = []
-    for i in range(random.randint(3, 5)):
-        tests.append(AssignmentTest(id=default_id_factory(), name=f"test {i}", assignment_id=assignment.id))
+
+    if not kwargs.get('shell_autograde_enabled', False):
+        n = 0
+        for i in range(random.randint(3, 5)):
+            tests.append(AssignmentTest(id=default_id_factory(), name=f"test {i}", assignment_id=assignment.id, order=n))
+            n += 1
+    else:
+        tests = [
+            AssignmentTest(id=default_id_factory(), name='helloworld', assignment_id=assignment.id, order=0),
+            AssignmentTest(id=default_id_factory(), name='mkdir exercise1', assignment_id=assignment.id, order=1),
+            AssignmentTest(id=default_id_factory(), name='cd exercise1', assignment_id=assignment.id, order=2),
+            AssignmentTest(id=default_id_factory(), name='pipe hello world', assignment_id=assignment.id, order=3),
+        ]
 
     submissions = []
     repos = []
@@ -256,59 +261,6 @@ def init_submissions(submissions):
                     test_result.message = "Test failed"
                     test_result.output_type = "diff"
                     test_result.output = rand_diff()
-
-
-def init_forums(course: Course):
-    student1 = User.query.join(InCourse).join(Course).filter(Course.id == course.id).first()
-    student2 = User.query.join(InCourse).join(Course).filter(Course.id == course.id).offset(1).first()
-    for i in range(3):
-        post = ForumPost(
-            owner_id=student1.id,
-            course_id=course.id,
-            visible_to_students=True,
-            pinned=False,
-            anonymous=False,
-            title=f'post title {i}',
-            content=f'post content {i}',
-        )
-        db.session.add(post)
-
-        category = ForumCategory(
-            name=f"Category {i}",
-            course=course,
-        )
-        db.session.add(category)
-
-        in_category = ForumPostInCategory(
-            post=post,
-            category=category,
-        )
-        db.session.add(in_category)
-
-        upvote = ForumPostUpvote(owner=student2, post=post)
-        db.session.add(upvote)
-
-        viewed1 = ForumPostViewed(owner=student1, post=post)
-        viewed2 = ForumPostViewed(owner=student2, post=post)
-        db.session.add_all([viewed1, viewed2])
-
-        comments: list[ForumPostComment] = []
-        for k in range(3):
-            comment = ForumPostComment(
-                id=default_id_factory(),
-                owner_id=student2.id,
-                post=post,
-                parent_id=None,
-                approved_by_id=None,
-                anonymous=False,
-                thread_start=False,
-                content=f'comment content {k}'
-            )
-            comments.append(comment)
-        comments[2].thread_start = True
-        comments[1].parent_id = comments[2].id
-        comments[0].parent_id = comments[2].id
-        db.session.add_all(comments)
 
 
 @with_context
@@ -449,6 +401,8 @@ def seed():
     )
     os_assignment4.theia_options['autosave'] = False
     os_assignment4.theia_options['persistent_storage'] = False
+    os_assignment4.theia_options['network_policy'] = 'shell-autograde-student'
+    os_assignment4.theia_options['network_dns_locked'] = False
     logger.info('init submissions assignment 0')
     init_submissions(os_submissions0)
     assign_questions(os_assignment0)

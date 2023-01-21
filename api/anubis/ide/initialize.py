@@ -1,10 +1,25 @@
+import copy
+
 from kubernetes import config, client
 
+from anubis.constants import (
+    THEIA_DEFAULT_OPTIONS,
+    THEIA_DEFAULT_NETWORK_POLICY,
+    THEIA_ADMIN_NETWORK_POLICY,
+)
 from anubis.k8s.theia.create import create_theia_k8s_pod_pvc
+from anubis.lms.courses import is_course_admin
 from anubis.lms.shell_autograde import create_shell_autograde_ide_submission
-from anubis.models import TheiaSession, db
+from anubis.models import (
+    db,
+    TheiaSession,
+    User,
+    Assignment,
+    AssignmentRepo,
+)
 from anubis.utils.auth.user import current_user
 from anubis.utils.config import get_config_int
+from anubis.utils.data import req_assert
 from anubis.utils.logging import logger
 
 
@@ -126,8 +141,8 @@ def initialize_ide(
     course_id: str = None,
     repo_url: str = "",
     playground: bool = False,
-    network_locked: bool = True,
-    network_policy: str = "os-student",
+    network_policy: str = THEIA_DEFAULT_NETWORK_POLICY,
+    network_dns_locked: bool = True,
     autosave: bool = True,
     autograde: bool = False,
     persistent_storage: bool = True,
@@ -136,12 +151,13 @@ def initialize_ide(
     admin: bool = False,
     credentials: bool = False,
     docker: bool = False,
+    owner_id: str = None
 ) -> TheiaSession:
     from anubis.rpc.enqueue import enqueue_ide_initialize
 
     # Create a new session
     session = TheiaSession(
-        owner_id=current_user.id,
+        owner_id=owner_id or current_user.id,
         active=True,
         state="Initializing",
         # Required
@@ -152,8 +168,8 @@ def initialize_ide(
         course_id=course_id,
         repo_url=repo_url,
         playground=playground,
-        network_locked=network_locked,
         network_policy=network_policy,
+        network_dns_locked=network_dns_locked,
         persistent_storage=persistent_storage,
         autosave=autosave,
         resources=resources,
@@ -174,4 +190,84 @@ def initialize_ide(
     enqueue_ide_initialize(session.id)
 
     # Redirect to proxy
+    return session
+
+
+def initialize_ide_for_assignment(user: User, assignment: Assignment, user_options: dict = None) -> TheiaSession:
+    user_options = user_options or {}
+
+    # If the user requesting this IDE is a course admin (ta/professor/superuser), then there
+    # are a few places we handle things differently.
+    is_admin = is_course_admin(assignment.course_id, user.id)
+
+    # If github repos are enabled for this assignment, then we will
+    # need to get the repo url.
+    repo_url: str = ""
+    if assignment.github_repo_required:
+        # Make sure github username is set
+        req_assert(
+            user.github_username is not None,
+            message="Please link your github account github account on profile page.",
+        )
+
+        # Make sure we have a repo we can use
+        repo: AssignmentRepo = AssignmentRepo.query.filter(
+            AssignmentRepo.owner_id == user.id,
+            AssignmentRepo.assignment_id == assignment.id,
+        ).first()
+
+        # Verify that the repo exists
+        req_assert(
+            repo is not None,
+            message="Anubis can not find your assignment repo. "
+                    "Please create your repo.",
+        )
+        # Update the repo url
+        repo_url = repo.repo_url
+
+    # Create the theia options from the assignment default
+    options: dict = copy.deepcopy(assignment.theia_options)
+
+    # Figure out options from user values
+    autosave = user_options.get("autosave", options.get("autosave", True))
+    persistent_storage = user_options.get("persistent_storage", options.get("persistent_storage", False))
+
+    print(user_options)
+    print(options)
+
+    logger.debug(f'autosave = {autosave}')
+    logger.debug(f'persistent_storage = {persistent_storage}')
+
+    # Figure out options from assignment
+    network_dns_locked = options.get("network_dns_locked", True)
+    network_policy = options.get("network_policy", THEIA_DEFAULT_NETWORK_POLICY)
+    resources = options.get(
+        "resources",
+        THEIA_DEFAULT_OPTIONS['resources'],
+    )
+    persistent_storage = options.get('persistent_storage', False) and persistent_storage
+
+    # If course admin, then give admin network policy
+    if is_admin:
+        network_dns_locked = False
+        network_policy = THEIA_ADMIN_NETWORK_POLICY
+
+    # Create the theia session with the proper settings
+    session: TheiaSession = initialize_ide(
+        image_id=assignment.theia_image_id,
+        owner_id=user.id,
+        assignment_id=assignment.id,
+        course_id=assignment.course_id,
+        repo_url=repo_url,
+        playground=False,
+        network_policy=network_policy,
+        network_dns_locked=network_dns_locked,
+        persistent_storage=persistent_storage,
+        autosave=autosave,
+        resources=resources,
+        admin=is_admin,
+        credentials=is_admin,
+        autograde=assignment.shell_autograde_enabled,
+    )
+
     return session

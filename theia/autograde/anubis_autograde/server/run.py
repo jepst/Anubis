@@ -1,14 +1,16 @@
 import argparse
+import traceback
 
 import gunicorn.app.base
 from flask import Flask
 
-from anubis_autograde.exercise.get import get_exercises
+from anubis_autograde.exercise.get import get_exercises, get_end_message, get_start_message
 from anubis_autograde.exercise.init import init_exercises
-from anubis_autograde.exercise.pipeline import initialize_submission_status
+from anubis_autograde.exercise.pipeline import pipeline_initialize_submission_status
 from anubis_autograde.logging import init_server_logging, log
 from anubis_autograde.server.views import views
 from anubis_autograde.shell.bashrc import init_bashrc
+from anubis_autograde.models import Exercise
 
 
 class _StandaloneApplication(gunicorn.app.base.BaseApplication):
@@ -38,15 +40,20 @@ def create_app(args: argparse.Namespace, skip_exercises: bool = False) -> Flask:
     app.config['TOKEN'] = args.token
     app.config['DEBUG'] = args.debug
     app.config['PROD'] = args.prod
+    app.config['RESUME'] = args.resume
 
     log.info(f'submission_id = {args.submission_id}')
     log.info(f'token = {args.token}')
     log.info(f'debug = {args.debug}')
     log.info(f'prod = {args.prod}')
+    log.info(f'resume = {args.resume}')
 
     if args.prod:
         with app.app_context():
-            initialize_submission_status()
+            try:
+                pipeline_initialize_submission_status()
+            except Exception as e:
+                log.error(traceback.format_exc() + f'\nFailed to call {pipeline_initialize_submission_status} Exception={e}')
 
     app.register_blueprint(views)
 
@@ -58,6 +65,13 @@ def create_app(args: argparse.Namespace, skip_exercises: bool = False) -> Flask:
 
 def run_server(args: argparse.Namespace):
     app = create_app(args)
+
+    if args.spot_check:
+        assert isinstance(get_start_message(), str)
+        assert isinstance(get_end_message(), str)
+        assert all(isinstance(exercise, Exercise) for exercise in get_exercises())
+        log.info(f'Spot check passed')
+        exit(0)
 
     if args.debug:
         host, port = args.bind.split(':')
